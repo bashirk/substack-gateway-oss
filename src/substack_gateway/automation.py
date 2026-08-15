@@ -472,7 +472,15 @@ class Autopilot:
             post_id=str(result.post_id) if result.post_id is not None else None,
             error=None,
         )
-        _log.info("Newsletter %s as draft %s", result.status, result.draft_id)
+        if result.status == "drafted":
+            _log.info("Newsletter saved as draft %s", result.draft_id)
+        else:
+            _log.info(
+                "Newsletter published: draft_id=%s post_id=%s send_email=%s",
+                result.draft_id,
+                result.post_id,
+                mode == "publish_and_email",
+            )
 
     def _write_image_artifact(self, slot: ScheduleSlot, image: GeneratedImage) -> Path:
         timestamp = slot.scheduled_at.strftime("%Y-%m-%dT%H-%M-%S%z")
@@ -708,6 +716,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         store,
         image_generator=image_generator,
     )
+    _log.info(
+        "Autopilot started: mode=%s timezone=%s poll_seconds=%d notes=%s "
+        "newsletters=%s images=%s state=%s artifacts=%s",
+        config.newsletter_mode,
+        config.timezone.key,
+        config.poll_seconds,
+        config.notes_enabled,
+        config.newsletters_enabled,
+        config.images_enabled,
+        config.state_path,
+        config.artifact_dir,
+    )
     try:
         if args.once:
             asyncio.run(autopilot.run_due())
@@ -715,6 +735,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             asyncio.run(run_forever(autopilot, config.poll_seconds))
     finally:
         store.close()
+        _log.info("Autopilot stopped")
 
 
 if __name__ == "__main__":

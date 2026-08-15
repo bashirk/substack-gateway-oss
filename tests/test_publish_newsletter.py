@@ -241,6 +241,24 @@ async def test_publish_web_checks_prepublish_and_never_sends_email() -> None:
 
 
 @pytest.mark.anyio
+async def test_publish_and_email_sets_both_email_delivery_flags() -> None:
+    publication = FakePublication()
+    content = parse_newsletter_markdown("# Title\n\nBody")
+
+    result = await NewsletterPublisher(publication, FakeIdentity()).publish(
+        content,
+        "publish_and_email",
+        email_confirmation="SEND_EMAIL_TO_ALL_SUBSCRIBERS",
+    )
+
+    assert result.post_id == 202
+    update = publication.calls[1][2]
+    assert update is not None
+    assert update["should_send_email"] is True
+    assert publication.calls[-1][2] == {"send": True, "saved_segment_id": None}
+
+
+@pytest.mark.anyio
 async def test_email_mode_requires_exact_confirmation() -> None:
     content = parse_newsletter_markdown("# Title\n\nBody")
 
