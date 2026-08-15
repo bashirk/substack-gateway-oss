@@ -13,3 +13,4 @@ __pycache__/
 .Python
 .DS_Store
 .env*
+autopilot.env

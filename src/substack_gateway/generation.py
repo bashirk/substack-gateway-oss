@@ -188,8 +188,12 @@ def _prompt(kind: str, topic: str, context: str) -> str:
         )
     if kind == "newsletter":
         return (
-            "Write a substantial daily Substack newsletter in Markdown, roughly 700 to "
-            + "1,200 words. Start with an H1 title, then a one-sentence subtitle in italics. "
+            "Write a substantial daily Substack newsletter in Markdown, roughly 700 to 1,200 words."
+            + "Prefer original analysis over news summaries|Explain why developments matter|"
+            + "Use concrete examples|Challenge conventional wisdom|Avoid clickbait|Avoid "
+            + "False AI-generated filler|Prioritize actionable insights|Clearly distinguish "
+            + "facts from opinions|Do not fabricate statistics or sources\n\n"
+            + "Start with an H1 title, then a one-sentence subtitle in italics. "
             + "Use a compelling opening, clear H2 sections, concrete useful takeaways, and a "
             + "concise closing. Do not claim current events or statistics unless they are "
             + "included in the supplied context.\n\n"

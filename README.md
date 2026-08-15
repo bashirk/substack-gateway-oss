@@ -97,24 +97,27 @@ Credential shape:
 ```json
 {
   "publication_url": "https://example.substack.com",
-  "substack_sid": "s%3A...",
-  "connect_sid": "s%3A..."
+  "substack_sid": "s%3A..."
 }
 ```
 
 Encode it with:
 
 ```bash
-printf '%s' '{"publication_url":"https://example.substack.com","substack_sid":"s%3A...","connect_sid":"s%3A..."}' | base64 | tr -d '\n'
+printf '%s' '{"publication_url":"https://example.substack.com","substack_sid":"s%3A..."}' | base64 | tr -d '\n'
 ```
 
 `SUBSTACK_GATEWAY_TOKEN` is this locally encoded JSON value; it is not a token
-issued by Substack under that name. Obtain the session-cookie values from the
-browser developer tools for your signed-in publication session (Application or
-Storage → Cookies), and rotate the session if a credential has been exposed.
+issued by Substack under that name. Obtain `substack_sid` from the
+`substack.sid` cookie for your signed-in publication session using browser
+developer tools (Application or Storage → Cookies) or a local cookies.txt
+export. Preserve the exported value exactly, including percent encoding.
 
-Treat `substack_sid` and `connect_sid` as bearer credentials. Do not commit
-real values to the repository.
+Older sessions may also expose a `connect.sid` cookie. If present, it can be
+included as the optional JSON field `"connect_sid"`; current sessions commonly
+use only `substack.sid`. Never invent or duplicate a missing cookie. Treat all
+session cookies as bearer credentials, do not commit real values, and rotate the
+session if a credential has been exposed.
 
 ## Content Autopilot
 

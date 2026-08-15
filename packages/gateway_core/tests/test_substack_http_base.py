@@ -52,6 +52,21 @@ def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_client_omits_missing_connect_sid() -> None:
+    client = _TestClient("sid")
+
+    assert client._cookies == {"substack.sid": "sid"}
+
+
+def test_client_includes_connect_sid_when_provided() -> None:
+    client = _TestClient("sid", "connect")
+
+    assert client._cookies == {
+        "substack.sid": "sid",
+        "connect.sid": "connect",
+    }
+
+
 @pytest.mark.anyio
 async def test_request_retries_retryable_status_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
