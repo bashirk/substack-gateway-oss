@@ -14,3 +14,5 @@ __pycache__/
 .DS_Store
 .env*
 autopilot.env
+autopilot*.env
+data/

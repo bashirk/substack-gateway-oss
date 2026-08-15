@@ -9,6 +9,7 @@ nav:
   - Home: index.md
   - Introduction: introduction.md
   - Installation: installation.md
+  - macOS Content Autopilot: macos-autopilot.md
   - Authentication: authentication.md
   - API Reference: api-reference.md
   - MCP: mcp.md

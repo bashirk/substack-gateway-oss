@@ -287,6 +287,7 @@ async def publish_markdown_newsletter(
     async with make_publication_client(
         credentials, credentials.publication_url
     ) as publication:
+
         async def publish_with(identity: IdentityAPI | None) -> NewsletterResult:
             return await NewsletterPublisher(
                 publication, identity, credentials.publication_url

@@ -48,6 +48,12 @@ Run the application locally:
 uv run python -m substack_gateway.main
 ```
 
+or from an environment file
+
+```bash
+uv run --env-file .env.autopilot substack-autopilot --once
+```
+
 Check the root metadata endpoint:
 
 ```bash
@@ -126,11 +132,16 @@ publishes notes on deterministic three-hour slots, and generates one newsletter
 slot per day. SQLite stores slot state, artifact paths, draft IDs, and post IDs
 so restarts do not intentionally create duplicate work.
 
-Copy `autopilot.env.example` to `.env.autopilot`, fill in credentials, and run:
+Copy `autopilot.env.example` to `.env.autopilot` and fill in credentials.
+Run one local cycle with:
 
 ```bash
-docker compose -f compose.autopilot.yaml up --build -d
+uv run --env-file .env.autopilot substack-autopilot --once
 ```
+
+For continuous no-Docker operation on a Mac, follow
+[Run Content Autopilot on macOS](docs/macos-autopilot.md). Docker deployment is
+described below.
 
 Set `SUBSTACK_AUTOPILOT_WRITER_ID` to your numeric Substack user ID. To find it,
 open a draft in Substack, use browser developer tools → Network, select the
@@ -174,10 +185,12 @@ newsletter body-image flow is enabled. Note creation posts to Substack's global
 `comment/feed/` endpoint; `SUBSTACK_AUTOPILOT_WRITER_ID` does not change note
 authentication if that endpoint rejects the session.
 
-The worker writes generated artifacts and `autopilot.sqlite3` to the persistent
-`autopilot-data` Docker volume. A `publishing_unknown` slot is deliberately not
-automatically retried because Substack may have accepted a request whose
-response was lost; inspect and reconcile such a slot manually.
+The worker writes generated artifacts and `autopilot.sqlite3` to the configured
+artifact directory and state path. Docker uses the persistent `autopilot-data`
+volume; local macOS installations should use absolute paths under `data/`. A
+`publishing_unknown` slot is deliberately not automatically retried because
+Substack may have accepted a request whose response was lost; inspect and
+reconcile such a slot manually.
 
 A single note artifact can also be published with:
 
