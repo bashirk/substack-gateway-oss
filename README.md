@@ -218,7 +218,9 @@ The explicit name keeps this deployment's container, network, and volume names
 separate from existing Compose applications, including an application whose
 default project name might otherwise match the directory. The `env_file` entry
 in `compose.autopilot.yaml` loads `.env.autopilot` into the container; a Compose
-`--env-file` option is not needed.
+`--env-file` option is not needed. On initial startup, the one-shot
+`autopilot-data-init` service makes the volume writable by the non-root worker.
+It must exit successfully before `autopilot` starts.
 
 Use the same project name and Compose file for every operation:
 
@@ -240,6 +242,15 @@ Do not add `-v` to `docker compose down`: that deletes the volume containing
 `autopilot.sqlite3`, generated artifacts, and upload metadata. Run exactly one
 Autopilot replica against this SQLite volume; do not use `--scale` or attach the
 volume to multiple workers.
+
+If an older deployment repeatedly reports `sqlite3.OperationalError: unable to
+open database file`, update to the current Compose file and run `up --build -d`
+again. To repair the existing volume immediately before updating, run:
+
+```bash
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml run --rm --user root autopilot chown -R appuser:appuser /data
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml up -d
+```
 
 Before an upgrade, stop only this worker and back up its volume to the
 deployment directory. Stopping it first gives SQLite a consistent snapshot and

@@ -1,8 +1,19 @@
 services:
+  autopilot-data-init:
+    build: .
+    command: ["chown", "-R", "appuser:appuser", "/data"]
+    user: root
+    restart: "no"
+    volumes:
+      - autopilot-data:/data
+
   autopilot:
     build: .
     command: ["substack-autopilot"]
     restart: unless-stopped
+    depends_on:
+      autopilot-data-init:
+        condition: service_completed_successfully
     env_file:
       - .env.autopilot
     environment:
