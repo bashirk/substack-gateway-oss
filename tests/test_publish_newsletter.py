@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any, final
 
 import pytest
 
+import substack_gateway.publish_newsletter as publish_newsletter
 from substack_gateway.publish_newsletter import (
     NewsletterOutcomeUnknownError,
     NewsletterPublisher,
     UploadedImage,
     parse_newsletter_markdown,
+    publish_markdown_newsletter,
 )
 
 
@@ -30,7 +33,11 @@ class FakeResponse:
 
 @final
 class FakeIdentity:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def get_own_id(self) -> int:
+        self.calls += 1
         return 42
 
 
@@ -130,6 +137,83 @@ async def test_draft_only_uses_har_payload_and_persists_id_immediately() -> None
     body = json.loads(update["draft_body"])
     assert body["content"][0]["type"] == "heading"
     assert body["content"][1]["content"][1]["marks"] == [{"type": "bold"}]
+
+
+@pytest.mark.anyio
+async def test_explicit_writer_id_bypasses_identity_lookup() -> None:
+    publication = FakePublication()
+    identity = FakeIdentity()
+
+    _ = await NewsletterPublisher(publication, identity).publish(
+        parse_newsletter_markdown("# Title\n\nBody"),
+        "draft_only",
+        writer_id=13775033,
+    )
+
+    assert identity.calls == 0
+    create = publication.calls[0][2]
+    assert create is not None
+    assert create["draft_bylines"] == [{"id": 13775033, "is_guest": False}]
+
+
+@pytest.mark.anyio
+async def test_identity_lookup_remains_the_fallback() -> None:
+    publication = FakePublication()
+    identity = FakeIdentity()
+
+    _ = await NewsletterPublisher(publication, identity).publish(
+        parse_newsletter_markdown("# Title\n\nBody"), "draft_only"
+    )
+
+    assert identity.calls == 1
+    create = publication.calls[0][2]
+    assert create is not None
+    assert create["draft_bylines"] == [{"id": 42, "is_guest": False}]
+
+
+@pytest.mark.anyio
+async def test_configured_writer_id_does_not_open_global_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    markdown = tmp_path / "newsletter.md"
+    _ = markdown.write_text("# Title\n\nBody", encoding="utf-8")
+    publication = FakePublication()
+
+    class AsyncClientContext:
+        async def __aenter__(self) -> FakePublication:
+            return publication
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        publish_newsletter,
+        "make_publication_client",
+        lambda credentials, publication_url: AsyncClientContext(),
+    )
+
+    def unexpected_global_client(credentials: object) -> None:
+        raise AssertionError("configured writer ID must bypass the global client")
+
+    monkeypatch.setattr(
+        publish_newsletter, "make_substack_client", unexpected_global_client
+    )
+    token = base64.b64encode(
+        json.dumps(
+            {
+                "publication_url": "https://publication.example.test",
+                "substack_sid": "session",
+            }
+        ).encode()
+    ).decode()
+
+    _ = await publish_markdown_newsletter(
+        markdown, token, "draft_only", writer_id=13775033
+    )
+
+    create = publication.calls[0][2]
+    assert create is not None
+    assert create["draft_bylines"] == [{"id": 13775033, "is_guest": False}]
 
 
 @pytest.mark.anyio

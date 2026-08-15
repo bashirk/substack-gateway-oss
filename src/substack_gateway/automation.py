@@ -52,6 +52,7 @@ class AutomationConfig:
     retry_seconds: int = 300
     newsletter_mode: NewsletterMode = "draft_only"
     email_confirmation: str | None = None
+    writer_id: int | None = None
     images_enabled: bool = False
     image_maximum_bytes: int = 20 * 1024 * 1024
 
@@ -72,6 +73,7 @@ class NewsletterPublish(Protocol):
         on_image_uploaded: Callable[[UploadedImage], None] | None = None,
         image_maximum_bytes: int = 20 * 1024 * 1024,
         email_confirmation: str | None = None,
+        writer_id: int | None = None,
     ) -> NewsletterResult: ...
 
 
@@ -445,6 +447,7 @@ class Autopilot:
                 on_image_uploaded=persist_uploaded,
                 image_maximum_bytes=self._config.image_maximum_bytes,
                 email_confirmation=self._config.email_confirmation,
+                writer_id=self._config.writer_id,
             )
         except NewsletterOutcomeUnknownError as exc:
             attempts = int(row["attempts"]) + 1
@@ -573,6 +576,7 @@ def config_from_env(
         )
     newsletter_mode = cast(NewsletterMode, newsletter_mode_value)
     email_confirmation = os.environ.get("SUBSTACK_AUTOPILOT_EMAIL_CONFIRMATION")
+    writer_id = _optional_positive_int("SUBSTACK_AUTOPILOT_WRITER_ID")
     if newsletter_mode == "publish_and_email" and email_confirmation != (
         "SEND_EMAIL_TO_ALL_SUBSCRIBERS"
     ):
@@ -610,6 +614,7 @@ def config_from_env(
         retry_seconds=int(os.environ.get("SUBSTACK_AUTOPILOT_RETRY_SECONDS", "300")),
         newsletter_mode=newsletter_mode,
         email_confirmation=email_confirmation,
+        writer_id=writer_id,
         images_enabled=images_enabled,
         image_maximum_bytes=int(
             os.environ.get("SUBSTACK_AUTOPILOT_IMAGE_MAX_BYTES", "20971520")
@@ -642,6 +647,19 @@ def config_from_env(
             ),
         )
     return config, provider, image_provider
+
+
+def _optional_positive_int(name: str) -> int | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
 
 
 def _boolean(name: str, default: bool) -> bool:

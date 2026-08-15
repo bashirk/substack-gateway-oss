@@ -72,7 +72,7 @@ class NewsletterPublisher:
     def __init__(
         self,
         publication: PublicationAPI,
-        identity: IdentityAPI,
+        identity: IdentityAPI | None,
         publication_url: str | None = None,
     ) -> None:
         self._publication = publication
@@ -93,6 +93,7 @@ class NewsletterPublisher:
         on_image_uploaded: Callable[[UploadedImage], None] | None = None,
         image_maximum_bytes: int = 20 * 1024 * 1024,
         email_confirmation: str | None = None,
+        writer_id: int | None = None,
     ) -> NewsletterResult:
         if mode == "artifact_only":
             raise ValueError("artifact_only mode does not create a Substack draft")
@@ -102,7 +103,10 @@ class NewsletterPublisher:
                 + _EMAIL_CONFIRMATION
             )
 
-        writer_id = await self._identity.get_own_id()
+        if writer_id is None:
+            if self._identity is None:
+                raise ValueError("Newsletter publishing requires a writer ID")
+            writer_id = await self._identity.get_own_id()
         bylines: list[dict[str, object]] = [{"id": writer_id, "is_guest": False}]
         if existing_draft_id is None:
             try:
@@ -266,6 +270,7 @@ async def publish_markdown_newsletter(
     on_image_uploaded: Callable[[UploadedImage], None] | None = None,
     image_maximum_bytes: int = 20 * 1024 * 1024,
     email_confirmation: str | None = None,
+    writer_id: int | None = None,
 ) -> NewsletterResult:
     content = parse_newsletter_markdown(path.read_text(encoding="utf-8"))
     credentials = decode_bearer_credentials(token)
@@ -273,7 +278,7 @@ async def publish_markdown_newsletter(
     async with make_publication_client(
         credentials, credentials.publication_url
     ) as publication:
-        async with make_substack_client(credentials) as identity:
+        async def publish_with(identity: IdentityAPI | None) -> NewsletterResult:
             return await NewsletterPublisher(
                 publication, identity, credentials.publication_url
             ).publish(
@@ -288,7 +293,13 @@ async def publish_markdown_newsletter(
                 on_image_uploaded=on_image_uploaded,
                 image_maximum_bytes=image_maximum_bytes,
                 email_confirmation=email_confirmation,
+                writer_id=writer_id,
             )
+
+        if writer_id is not None:
+            return await publish_with(None)
+        async with make_substack_client(credentials) as identity:
+            return await publish_with(identity)
 
 
 def _create_payload(bylines: list[dict[str, object]]) -> dict[str, Any]:

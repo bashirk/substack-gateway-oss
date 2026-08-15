@@ -132,6 +132,14 @@ Copy `autopilot.env.example` to `.env.autopilot`, fill in credentials, and run:
 docker compose -f compose.autopilot.yaml up --build -d
 ```
 
+Set `SUBSTACK_AUTOPILOT_WRITER_ID` to your numeric Substack user ID. To find it,
+open a draft in Substack, use browser developer tools → Network, select the
+successful `GET /api/v1/drafts/<draft-id>` request, and read
+`postBylines[0].user_id` from its JSON response. The worker uses this value in
+newsletter `draft_bylines` and skips the legacy global `/api/v1/user-settings`
+lookup, which may return 403 for modern `substack.sid`-only sessions. Do not use
+the draft ID, publication ID, or post ID as the writer ID.
+
 Newsletter behavior is controlled by
 `SUBSTACK_AUTOPILOT_NEWSLETTER_MODE`:
 
@@ -162,7 +170,9 @@ automatically.
 
 Newsletter cover images remain unset, and generated images are not attached to
 notes. Those private contracts have not been verified, so only the verified
-newsletter body-image flow is enabled.
+newsletter body-image flow is enabled. Note creation posts to Substack's global
+`comment/feed/` endpoint; `SUBSTACK_AUTOPILOT_WRITER_ID` does not change note
+authentication if that endpoint rejects the session.
 
 The worker writes generated artifacts and `autopilot.sqlite3` to the persistent
 `autopilot-data` Docker volume. A `publishing_unknown` slot is deliberately not
@@ -202,8 +212,8 @@ cp autopilot.env.example .env.autopilot
 chmod 600 .env.autopilot
 ```
 
-Edit `.env.autopilot` with the locally constructed `SUBSTACK_GATEWAY_TOKEN` and
-Azure OpenAI settings described above. Keep
+Edit `.env.autopilot` with the locally constructed `SUBSTACK_GATEWAY_TOKEN`,
+`SUBSTACK_AUTOPILOT_WRITER_ID`, and Azure OpenAI settings described above. Keep
 `SUBSTACK_AUTOPILOT_NEWSLETTER_MODE=draft_only` until drafts have been reviewed
 successfully. Never commit `.env.autopilot`, and rotate the Substack session
 cookies and update the file if the session expires or is exposed.

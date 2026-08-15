@@ -8,11 +8,14 @@ from pathlib import Path
 from typing import final
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from substack_gateway.automation import (
     AutomationConfig,
     Autopilot,
     ScheduleSlot,
     StateStore,
+    config_from_env,
     due_slots,
     topic_for_slot,
 )
@@ -60,6 +63,7 @@ def config(
     dry_run: bool = False,
     newsletter_mode: NewsletterMode = "draft_only",
     images_enabled: bool = False,
+    writer_id: int | None = None,
 ) -> AutomationConfig:
     return AutomationConfig(
         token="token",
@@ -76,6 +80,7 @@ def config(
         poll_seconds=60,
         retry_seconds=10,
         newsletter_mode=newsletter_mode,
+        writer_id=writer_id,
         images_enabled=images_enabled,
     )
 
@@ -174,7 +179,7 @@ def test_publish_failure_is_not_automatically_retried(tmp_path: Path) -> None:
 
 
 def test_newsletter_draft_id_and_timestamp_are_persisted(tmp_path: Path) -> None:
-    settings = config(tmp_path, notes_enabled=False)
+    settings = config(tmp_path, notes_enabled=False, writer_id=13775033)
     generator = FakeGenerator()
     calls = 0
 
@@ -192,10 +197,12 @@ def test_newsletter_draft_id_and_timestamp_are_persisted(tmp_path: Path) -> None
         on_image_uploaded: Callable[[UploadedImage], None] | None = None,
         image_maximum_bytes: int = 20 * 1024 * 1024,
         email_confirmation: str | None = None,
+        writer_id: int | None = None,
     ) -> NewsletterResult:
         nonlocal calls
         calls += 1
         assert mode == "draft_only"
+        assert writer_id == 13775033
         assert existing_draft_id is None
         assert existing_draft_updated_at is None
         assert on_draft_created is not None
@@ -241,6 +248,7 @@ def test_newsletter_restart_reuses_persisted_draft(tmp_path: Path) -> None:
         on_image_uploaded: Callable[[UploadedImage], None] | None = None,
         image_maximum_bytes: int = 20 * 1024 * 1024,
         email_confirmation: str | None = None,
+        writer_id: int | None = None,
     ) -> NewsletterResult:
         seen_existing.append((existing_draft_id, existing_draft_updated_at))
         assert on_draft_created is not None
@@ -297,6 +305,7 @@ def test_ambiguous_newsletter_outcome_is_not_retried(tmp_path: Path) -> None:
         on_image_uploaded: Callable[[UploadedImage], None] | None = None,
         image_maximum_bytes: int = 20 * 1024 * 1024,
         email_confirmation: str | None = None,
+        writer_id: int | None = None,
     ) -> NewsletterResult:
         nonlocal calls
         calls += 1
@@ -390,6 +399,7 @@ def test_restart_reuses_generated_image_artifact(tmp_path: Path) -> None:
         on_image_uploaded: Callable[[UploadedImage], None] | None = None,
         image_maximum_bytes: int = 20 * 1024 * 1024,
         email_confirmation: str | None = None,
+        writer_id: int | None = None,
     ) -> NewsletterResult:
         nonlocal publish_calls
         publish_calls += 1
@@ -520,6 +530,41 @@ def test_disabled_images_preserve_existing_behavior(tmp_path: Path) -> None:
 
     assert image_generator.calls == []
     assert rows(settings.state_path)[0]["image_artifact_path"] is None
+
+
+def _set_required_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_TOPICS", "engineering")
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_TIMEZONE", "UTC")
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_NOTES_ENABLED", "false")
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_NEWSLETTERS_ENABLED", "false")
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_IMAGES_ENABLED", "false")
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_NEWSLETTER_MODE", "draft_only")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://azure.example.test")
+    monkeypatch.setenv("AZURE_OPENAI_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_VERSION", "2024-10-21")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT_NAME", "test-deployment")
+
+
+def test_config_accepts_positive_writer_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_WRITER_ID", "13775033")
+
+    settings, _, _ = config_from_env(dry_run=True)
+
+    assert settings.writer_id == 13775033
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "0", "-1"])
+def test_config_rejects_invalid_writer_id(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("SUBSTACK_AUTOPILOT_WRITER_ID", value)
+
+    with pytest.raises(
+        ValueError, match="SUBSTACK_AUTOPILOT_WRITER_ID must be a positive integer"
+    ):
+        _ = config_from_env(dry_run=True)
 
 
 def test_dry_run_and_newsletter_persist_artifacts(tmp_path: Path) -> None:

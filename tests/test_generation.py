@@ -8,6 +8,8 @@ import pytest
 import respx
 
 from substack_gateway.generation import (
+    AzureOpenAIConfig,
+    AzureOpenAIContentGenerator,
     AzureOpenAIImageConfig,
     AzureOpenAIImageGenerator,
     image_prompt,
@@ -17,6 +19,15 @@ from substack_gateway.generation import (
 _PNG = b"\x89PNG\r\n\x1a\nimage-data"
 
 
+def content_config() -> AzureOpenAIConfig:
+    return AzureOpenAIConfig(
+        endpoint="https://example.openai.azure.com",
+        api_key="secret",
+        api_version="2024-10-21",
+        deployment="text model",
+    )
+
+
 def config() -> AzureOpenAIImageConfig:
     return AzureOpenAIImageConfig(
         endpoint="https://example.openai.azure.com",
@@ -24,6 +35,48 @@ def config() -> AzureOpenAIImageConfig:
         api_version="2025-04-01-preview",
         deployment="image model",
     )
+
+
+@respx.mock
+def test_content_generator_omits_temperature() -> None:
+    route = respx.post(
+        "https://example.openai.azure.com/openai/deployments/text%20model/"
+        "chat/completions?api-version=2024-10-21"
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"choices": [{"message": {"content": "Generated text"}}]}
+        )
+    )
+
+    content = asyncio.run(
+        AzureOpenAIContentGenerator(content_config()).generate(
+            "note", "reliable systems", "Direct and practical."
+        )
+    )
+
+    assert route.called
+    assert "temperature" not in route.calls[0].request.content.decode()
+    assert content == "Generated text"
+
+
+@respx.mock
+def test_content_generator_includes_azure_error_detail() -> None:
+    respx.post(
+        "https://example.openai.azure.com/openai/deployments/text%20model/"
+        "chat/completions?api-version=2024-10-21"
+    ).mock(
+        return_value=httpx.Response(
+            400,
+            json={"error": {"message": "Unsupported parameter: temperature"}},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Unsupported parameter: temperature"):
+        asyncio.run(
+            AzureOpenAIContentGenerator(content_config()).generate(
+                "note", "reliable systems", "Direct and practical."
+            )
+        )
 
 
 def test_image_prompt_is_deterministic_and_excludes_text() -> None:

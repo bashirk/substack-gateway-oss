@@ -71,10 +71,9 @@ class AzureOpenAIContentGenerator:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": 0.8,
                 },
             )
-            _ = response.raise_for_status()
+            _raise_azure_error(response, "text generation")
             payload: Any = response.json()
 
         try:
@@ -113,7 +112,7 @@ class AzureOpenAIImageGenerator:
                 headers={"api-key": self._config.api_key},
                 json=request,
             )
-            _ = response.raise_for_status()
+            _raise_azure_error(response, "image generation")
             payload: Any = response.json()
             item = _first_image(payload)
             encoded = item.get("b64_json")
@@ -131,9 +130,19 @@ class AzureOpenAIImageGenerator:
                 ):
                     raise ValueError("Azure OpenAI returned no image data")
                 download = await client.get(image_url)
-                _ = download.raise_for_status()
+                _raise_azure_error(download, "image download")
                 content = download.content
         return validate_image(content, self._config.maximum_bytes)
+
+
+def _raise_azure_error(response: httpx.Response, operation: str) -> None:
+    if response.is_success:
+        return
+    detail = response.text.strip().replace("\n", " ")[:2000]
+    suffix = f": {detail}" if detail else ""
+    raise RuntimeError(
+        f"Azure OpenAI {operation} failed with HTTP {response.status_code}{suffix}"
+    )
 
 
 def image_prompt(kind: str, topic: str, context: str) -> str:
