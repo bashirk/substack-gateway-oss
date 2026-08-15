@@ -15,6 +15,8 @@ dependencies = [
 [project.scripts]
 app = "substack_gateway.main:main"
 gateway_oss = "substack_gateway.main:main"
+substack-publish-note = "substack_gateway.publish_note:main"
+substack-autopilot = "substack_gateway.automation:main"
 
 [build-system]
 requires = ["hatchling"]

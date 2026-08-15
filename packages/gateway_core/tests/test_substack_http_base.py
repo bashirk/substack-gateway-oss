@@ -161,6 +161,29 @@ async def test_request_raises_after_retry_budget_exhausted(
 
 
 @pytest.mark.anyio
+async def test_post_once_does_not_retry_retryable_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    async def fake_request(
+        self: httpx.AsyncClient, method: str, url: str, **kwargs: object
+    ) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503, json={"message": "busy"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    monkeypatch.setattr(base, "_get_rate_limiter", lambda: _NoopRateLimiter())
+
+    async with _TestClient("sid", "connect") as client:
+        with pytest.raises(SubstackAPIError, match="Substack returned 503: busy"):
+            await client.post_once("drafts", json={})
+
+    assert attempts == 1
+
+
+@pytest.mark.anyio
 async def test_rate_limiter_delays_subsequent_calls() -> None:
     limiter = base.Limiter(base.Rate(1, base.Duration.SECOND))
 

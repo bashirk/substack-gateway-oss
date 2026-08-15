@@ -7,7 +7,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from typing import Any, Self
+from typing import Any, Never, Self
 
 import httpx
 from pyrate_limiter import Duration, Limiter, Rate
@@ -226,8 +226,16 @@ class SubstackHTTPBase:
     async def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("POST", self._url(path), **kwargs)
 
+    async def post_once(self, path: str, **kwargs: Any) -> httpx.Response:
+        """POST once, without retrying an ambiguous non-idempotent request."""
+        return await self._request_once("POST", self._url(path), **kwargs)
+
     async def put(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("PUT", self._url(path), **kwargs)
+
+    async def put_once(self, path: str, **kwargs: Any) -> httpx.Response:
+        """PUT once, for workflows that manage conflict recovery explicitly."""
+        return await self._request_once("PUT", self._url(path), **kwargs)
 
     async def delete(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("DELETE", self._url(path), **kwargs)
@@ -235,6 +243,11 @@ class SubstackHTTPBase:
     @_with_substack_retries
     @_with_rate_limit
     async def _send_request(
+        self, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
+        return await self._perform_request(method, url, **kwargs)
+
+    async def _perform_request(
         self, method: str, url: str, **kwargs: Any
     ) -> httpx.Response:
         if self._http is None:
@@ -285,9 +298,25 @@ class SubstackHTTPBase:
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         return await self._send_request(method, url, **kwargs)
 
+    @_with_rate_limit
+    async def _send_request_once(
+        self, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
+        return await self._perform_request(method, url, **kwargs)
+
+    async def _request_once(
+        self, method: str, url: str, **kwargs: Any
+    ) -> httpx.Response:
+        try:
+            return await self._send_request_once(method, url, **kwargs)
+        except RetryableTransportError as exc:
+            raise SubstackAPIError(502, f"Network error: {exc.cause}") from exc.cause
+        except RetryableSubstackError as exc:
+            self._raise_api_error(method, url, exc.response, exc.elapsed)
+
     def _raise_api_error(
         self, method: str, url: str, response: httpx.Response, elapsed: float
-    ) -> None:
+    ) -> Never:
         _log.warning(
             "%s← %s %s → %d (%.3fs)",
             self._rid,

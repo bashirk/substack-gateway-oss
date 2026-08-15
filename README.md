@@ -105,11 +105,176 @@ Credential shape:
 Encode it with:
 
 ```bash
-echo '{"publication_url":"https://example.substack.com","substack_sid":"s%3A...","connect_sid":"s%3A..."}' | base64
+printf '%s' '{"publication_url":"https://example.substack.com","substack_sid":"s%3A...","connect_sid":"s%3A..."}' | base64 | tr -d '\n'
 ```
+
+`SUBSTACK_GATEWAY_TOKEN` is this locally encoded JSON value; it is not a token
+issued by Substack under that name. Obtain the session-cookie values from the
+browser developer tools for your signed-in publication session (Application or
+Storage → Cookies), and rotate the session if a credential has been exposed.
 
 Treat `substack_sid` and `connect_sid` as bearer credentials. Do not commit
 real values to the repository.
+
+## Content Autopilot
+
+The optional `substack-autopilot` worker generates Markdown with Azure OpenAI,
+publishes notes on deterministic three-hour slots, and generates one newsletter
+slot per day. SQLite stores slot state, artifact paths, draft IDs, and post IDs
+so restarts do not intentionally create duplicate work.
+
+Copy `autopilot.env.example` to `.env.autopilot`, fill in credentials, and run:
+
+```bash
+docker compose -f compose.autopilot.yaml up --build -d
+```
+
+Newsletter behavior is controlled by
+`SUBSTACK_AUTOPILOT_NEWSLETTER_MODE`:
+
+- `artifact_only`: generate Markdown without contacting Substack.
+- `draft_only`: create or update a draft (the safe default).
+- `publish_web`: publish to the web with email delivery disabled.
+- `publish_and_email`: publish and request subscriber email delivery.
+
+`publish_and_email` additionally requires the exact explicit confirmation shown
+in `autopilot.env.example`. Email delivery is high impact and the captured API
+flow has only been verified with email disabled; test it against a disposable
+publication before enabling it for a real subscriber list.
+
+Image generation is disabled by default. Set
+`SUBSTACK_AUTOPILOT_IMAGES_ENABLED=true` and configure an Azure OpenAI image
+deployment to generate PNG, JPEG, or WebP artifacts. The generator accepts Azure
+responses containing either base64 image data or a temporary HTTPS download URL.
+Image size and quality values are deployment-specific; the configured Azure
+model and API version must support them.
+
+Generated images are written atomically and their paths and generation status
+are persisted in SQLite, so a restart reuses an existing artifact instead of
+regenerating it. For newsletters, the worker uploads the image after creating the
+draft and prepends it to the newsletter body. Upload response metadata is also
+persisted so a later draft-update retry reuses the uploaded image. An upload with
+a lost response is treated as `publishing_unknown` and is not retried
+automatically.
+
+Newsletter cover images remain unset, and generated images are not attached to
+notes. Those private contracts have not been verified, so only the verified
+newsletter body-image flow is enabled.
+
+The worker writes generated artifacts and `autopilot.sqlite3` to the persistent
+`autopilot-data` Docker volume. A `publishing_unknown` slot is deliberately not
+automatically retried because Substack may have accepted a request whose
+response was lost; inspect and reconcile such a slot manually.
+
+A single note artifact can also be published with:
+
+```bash
+uv run substack-publish-note path/to/note.md
+```
+
+### Deploy Content Autopilot on an Azure VM
+
+These instructions target an Ubuntu Azure VM that may already run other Docker
+applications. Content Autopilot is a background worker: it publishes no host
+ports and needs no reverse-proxy route or inbound Azure Network Security Group
+(NSG) rule. It requires outbound TCP 443 access to your Azure OpenAI endpoint,
+Substack, and Substack's media storage.
+
+Install Docker Engine and the Docker Compose plugin using Docker's official
+Ubuntu instructions, then verify them:
+
+```bash
+docker --version
+docker compose version
+```
+
+Install the worker in its own directory. Replace the repository URL if you use a
+fork:
+
+```bash
+sudo git clone https://github.com/jakub-k-slys/substack-gateway-oss.git /opt/substack-gateway-oss
+sudo chown -R "$USER":"$USER" /opt/substack-gateway-oss
+cd /opt/substack-gateway-oss
+cp autopilot.env.example .env.autopilot
+chmod 600 .env.autopilot
+```
+
+Edit `.env.autopilot` with the locally constructed `SUBSTACK_GATEWAY_TOKEN` and
+Azure OpenAI settings described above. Keep
+`SUBSTACK_AUTOPILOT_NEWSLETTER_MODE=draft_only` until drafts have been reviewed
+successfully. Never commit `.env.autopilot`, and rotate the Substack session
+cookies and update the file if the session expires or is exposed.
+
+Start the worker with an explicit Compose project name:
+
+```bash
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml up --build -d
+```
+
+The explicit name keeps this deployment's container, network, and volume names
+separate from existing Compose applications, including an application whose
+default project name might otherwise match the directory. The `env_file` entry
+in `compose.autopilot.yaml` loads `.env.autopilot` into the container; a Compose
+`--env-file` option is not needed.
+
+Use the same project name and Compose file for every operation:
+
+```bash
+# Status
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml ps
+
+# Follow logs
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml logs -f --tail=200 autopilot
+
+# Restart
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml restart autopilot
+
+# Stop without deleting persistent data
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml down
+```
+
+Do not add `-v` to `docker compose down`: that deletes the volume containing
+`autopilot.sqlite3`, generated artifacts, and upload metadata. Run exactly one
+Autopilot replica against this SQLite volume; do not use `--scale` or attach the
+volume to multiple workers.
+
+Before an upgrade, stop only this worker and back up its volume to the
+deployment directory. Stopping it first gives SQLite a consistent snapshot and
+does not affect other Compose projects:
+
+```bash
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml stop autopilot
+VOLUME="$(docker volume ls --filter label=com.docker.compose.project=substack-autopilot --filter label=com.docker.compose.volume=autopilot-data -q)"
+test -n "$VOLUME"
+docker run --rm -v "$VOLUME:/data:ro" -v "$PWD:/backup" alpine tar -czf /backup/substack-autopilot-backup.tar.gz -C /data .
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml start autopilot
+```
+
+The temporary `alpine` image may need to be pulled the first time. Protect the
+backup because its SQLite database and artifacts contain publication content.
+Copy it to durable storage or include it in the VM's encrypted backup policy.
+
+Upgrade and rebuild in place:
+
+```bash
+cd /opt/substack-gateway-oss
+git pull --ff-only
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml up --build -d
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml logs --tail=200 autopilot
+```
+
+To roll back application code, check out a previously tested tag or commit and
+rebuild with the same project name:
+
+```bash
+cd /opt/substack-gateway-oss
+git checkout --detach COMMIT_SHA
+docker compose --project-name substack-autopilot -f compose.autopilot.yaml up --build -d
+```
+
+Replace `COMMIT_SHA` with the tested revision. Preserve `.env.autopilot` and the
+named volume. If a release changes the database incompatibly, stop the worker
+and restore the matching volume backup before starting the older version.
 
 ## MCP
 

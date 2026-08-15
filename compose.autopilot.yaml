@@ -1,0 +1,15 @@
+services:
+  autopilot:
+    build: .
+    command: ["substack-autopilot"]
+    restart: unless-stopped
+    env_file:
+      - .env.autopilot
+    environment:
+      SUBSTACK_AUTOPILOT_STATE_PATH: /data/autopilot.sqlite3
+      SUBSTACK_AUTOPILOT_ARTIFACT_DIR: /data/artifacts
+    volumes:
+      - autopilot-data:/data
+
+volumes:
+  autopilot-data:
