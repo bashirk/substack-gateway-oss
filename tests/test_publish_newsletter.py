@@ -8,6 +8,7 @@ from typing import Any, final
 import pytest
 
 import substack_gateway.publish_newsletter as publish_newsletter
+from gateway_core.client.exceptions import SubstackAuthError
 from substack_gateway.publish_newsletter import (
     NewsletterOutcomeUnknownError,
     NewsletterPublisher,
@@ -46,10 +47,12 @@ class FakePublication:
     def __init__(
         self,
         *,
+        fail_create: bool = False,
         fail_image: bool = False,
         image_response: dict[str, Any] | None = None,
     ) -> None:
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
+        self.fail_create = fail_create
         self.fail_image = fail_image
         self.image_response = image_response
 
@@ -63,6 +66,8 @@ class FakePublication:
         payload = kwargs.get("json")
         self.calls.append(("POST", path, payload))
         if path == "drafts":
+            if self.fail_create:
+                raise SubstackAuthError(403, "Forbidden")
             return FakeResponse({"id": 101, "draft_updated_at": "2026-08-14T20:00:00Z"})
         if path == "image":
             if self.fail_image:
@@ -373,6 +378,17 @@ async def test_existing_uploaded_image_avoids_reupload(tmp_path: Path) -> None:
     )
 
     assert [call[:2] for call in publication.calls] == [("PUT", "drafts/101")]
+
+
+@pytest.mark.anyio
+async def test_draft_creation_auth_error_is_not_ambiguous() -> None:
+    publication = FakePublication(fail_create=True)
+
+    with pytest.raises(SubstackAuthError, match="Forbidden"):
+        await NewsletterPublisher(publication, FakeIdentity()).publish(
+            parse_newsletter_markdown("# Title\n\nBody"),
+            "draft_only",
+        )
 
 
 @pytest.mark.anyio

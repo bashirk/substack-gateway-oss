@@ -14,6 +14,7 @@ from gateway_core.auth import (
     make_publication_client,
     make_substack_client,
 )
+from gateway_core.client.exceptions import SubstackAuthError
 from substack_gateway.generation import validate_image
 
 NewsletterMode = Literal[
@@ -118,6 +119,8 @@ class NewsletterPublisher:
                 updated_at = _required_str(created, "draft_updated_at")
                 if on_draft_created is not None:
                     on_draft_created(draft_id, updated_at)
+            except SubstackAuthError:
+                raise
             except Exception as exc:
                 raise NewsletterOutcomeUnknownError(
                     "Draft creation may have succeeded; inspect Substack before retrying"
@@ -146,6 +149,8 @@ class NewsletterPublisher:
                 uploaded_image = _parse_uploaded_image(response.json())
                 if on_image_uploaded is not None:
                     on_image_uploaded(uploaded_image)
+            except SubstackAuthError:
+                raise
             except Exception as exc:
                 raise NewsletterOutcomeUnknownError(
                     f"Image upload for draft {draft_id} has an unknown outcome; "
@@ -169,6 +174,8 @@ class NewsletterPublisher:
             updated_at = _required_str(response.json(), "draft_updated_at")
             if on_draft_created is not None:
                 on_draft_created(draft_id, updated_at)
+        except SubstackAuthError:
+            raise
         except Exception as exc:
             raise NewsletterOutcomeUnknownError(
                 f"Draft {draft_id} update has an unknown outcome"
@@ -186,6 +193,8 @@ class NewsletterPublisher:
             return NewsletterResult(
                 "published", draft_id, _optional_int(published, "id")
             )
+        except SubstackAuthError:
+            raise
         except Exception as exc:
             raise NewsletterOutcomeUnknownError(
                 f"Draft {draft_id} publish has an unknown outcome"
