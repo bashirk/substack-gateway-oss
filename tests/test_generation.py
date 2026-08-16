@@ -79,6 +79,29 @@ def test_content_generator_includes_azure_error_detail() -> None:
         )
 
 
+@respx.mock
+def test_x_content_generator_uses_platform_specific_prompt() -> None:
+    route = respx.post(
+        "https://example.openai.azure.com/openai/deployments/text%20model/"
+        "chat/completions?api-version=2024-10-21"
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"choices": [{"message": {"content": "Concise X post"}}]}
+        )
+    )
+
+    content = asyncio.run(
+        AzureOpenAIContentGenerator(content_config()).generate(
+            "x_post", "reliable systems", "Direct and practical."
+        )
+    )
+
+    request = route.calls[0].request.content.decode()
+    assert "expert X writer" in request
+    assert "under 260 Unicode characters" in request
+    assert content == "Concise X post"
+
+
 def test_image_prompt_is_deterministic_and_excludes_text() -> None:
     first = image_prompt("newsletter", "reliable systems", "Direct and practical.")
 
@@ -87,6 +110,7 @@ def test_image_prompt_is_deterministic_and_excludes_text() -> None:
     )
     assert "reliable systems" in first
     assert "Do not include words" in first
+    assert "an X post" in image_prompt("x_post", "reliable systems", "Direct")
 
 
 @respx.mock

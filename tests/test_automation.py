@@ -15,6 +15,7 @@ from substack_gateway.automation import (
     Autopilot,
     ScheduleSlot,
     StateStore,
+    XMode,
     config_from_env,
     due_slots,
     topic_for_slot,
@@ -26,6 +27,7 @@ from substack_gateway.publish_newsletter import (
     NewsletterResult,
     UploadedImage,
 )
+from substack_gateway.publish_x import XPublishOutcomeUnknownError, XPublishResult
 
 
 @final
@@ -64,6 +66,9 @@ def config(
     newsletter_mode: NewsletterMode = "draft_only",
     images_enabled: bool = False,
     writer_id: int | None = None,
+    x_enabled: bool = False,
+    x_mode: XMode = "artifact_only",
+    x_images_enabled: bool = False,
 ) -> AutomationConfig:
     return AutomationConfig(
         token="token",
@@ -82,6 +87,10 @@ def config(
         newsletter_mode=newsletter_mode,
         writer_id=writer_id,
         images_enabled=images_enabled,
+        x_enabled=x_enabled,
+        x_mode=x_mode,
+        x_cookies_path=tmp_path / "x-cookies.json",
+        x_images_enabled=x_images_enabled,
     )
 
 
@@ -105,6 +114,22 @@ def test_due_slots_use_interval_and_daily_time(tmp_path: Path) -> None:
     assert [(slot.kind, slot.scheduled_at.isoformat()) for slot in slots] == [
         ("note", "2026-08-14T12:00:00-04:00"),
         ("newsletter", "2026-08-14T08:00:00-04:00"),
+    ]
+
+
+def test_x_due_slot_uses_independent_interval(tmp_path: Path) -> None:
+    settings = config(
+        tmp_path,
+        notes_enabled=False,
+        newsletters_enabled=False,
+        x_enabled=True,
+    )
+    now = datetime(2026, 8, 14, 17, 47, tzinfo=UTC)
+
+    slots = due_slots(now, settings)
+
+    assert [(slot.kind, slot.scheduled_at.isoformat()) for slot in slots] == [
+        ("x_post", "2026-08-14T15:00:00+00:00")
     ]
 
 
@@ -371,6 +396,7 @@ def test_state_store_migrates_image_columns(tmp_path: Path) -> None:
         "image_upload_width",
         "image_upload_height",
         "image_upload_error",
+        "x_media_id",
     } <= columns
 
 
@@ -476,23 +502,29 @@ def test_restart_reuses_generated_image_artifact(tmp_path: Path) -> None:
 def test_image_failure_is_persisted_and_retried(tmp_path: Path) -> None:
     settings = config(
         tmp_path,
-        newsletters_enabled=False,
+        notes_enabled=False,
         images_enabled=True,
+        newsletter_mode="publish_web",
     )
     image_generator = FakeImageGenerator(failures=1)
 
-    async def publish(path: Path, token: str, attachment: str | None) -> int:
-        return 123
+    async def publish_newsletter(
+        path: Path,
+        token: str,
+        mode: NewsletterMode,
+        **kwargs: object,
+    ) -> NewsletterResult:
+        return NewsletterResult("published", 123, 456)
 
     store = StateStore(settings.state_path)
     autopilot = Autopilot(
         settings,
         FakeGenerator(),
         store,
-        publish,
+        newsletter_publisher=publish_newsletter,
         image_generator=image_generator,
     )
-    now = datetime(2026, 8, 14, 12, 5, tzinfo=UTC)
+    now = datetime(2026, 8, 14, 8, 5, tzinfo=UTC)
     asyncio.run(autopilot.run_due(now))
     failed = rows(settings.state_path)[0]
     assert failed["status"] == "failed"
@@ -532,17 +564,165 @@ def test_disabled_images_preserve_existing_behavior(tmp_path: Path) -> None:
     assert rows(settings.state_path)[0]["image_artifact_path"] is None
 
 
+def test_x_publish_persists_media_and_post_ids(tmp_path: Path) -> None:
+    settings = config(
+        tmp_path,
+        notes_enabled=False,
+        newsletters_enabled=False,
+        x_enabled=True,
+        x_mode="publish",
+        x_images_enabled=True,
+    )
+    image_generator = FakeImageGenerator()
+    calls: list[tuple[str | None, Path | None]] = []
+
+    async def publish_x_post(
+        text: str,
+        cookie_file: Path,
+        *,
+        media_path: Path | None = None,
+        existing_media_id: str | None = None,
+        on_media_upload_started: Callable[[], object] | None = None,
+        on_media_uploaded: Callable[[str], object] | None = None,
+    ) -> XPublishResult:
+        calls.append((existing_media_id, media_path))
+        assert on_media_upload_started is not None
+        assert on_media_uploaded is not None
+        on_media_upload_started()
+        on_media_uploaded("123456")
+        return XPublishResult("789", "https://x.com/i/status/789", "123456")
+
+    store = StateStore(settings.state_path)
+    asyncio.run(
+        Autopilot(
+            settings,
+            FakeGenerator(),
+            store,
+            image_generator=image_generator,
+            x_publisher=publish_x_post,
+        ).run_due(datetime(2026, 8, 14, 15, 5, tzinfo=UTC))
+    )
+    store.close()
+
+    row = rows(settings.state_path)[0]
+    assert calls[0][0] is None
+    assert calls[0][1] is not None
+    assert row["status"] == "published"
+    assert row["external_id"] == "789"
+    assert row["post_id"] == "789"
+    assert row["x_media_id"] == "123456"
+
+
+def test_x_publish_reuses_persisted_media_after_pre_create_failure(
+    tmp_path: Path,
+) -> None:
+    settings = config(
+        tmp_path,
+        notes_enabled=False,
+        newsletters_enabled=False,
+        x_enabled=True,
+        x_mode="publish",
+        x_images_enabled=True,
+    )
+    calls: list[str | None] = []
+
+    async def publish_x_post(
+        text: str,
+        cookie_file: Path,
+        *,
+        media_path: Path | None = None,
+        existing_media_id: str | None = None,
+        on_media_upload_started: Callable[[], object] | None = None,
+        on_media_uploaded: Callable[[str], object] | None = None,
+    ) -> XPublishResult:
+        calls.append(existing_media_id)
+        if existing_media_id is None:
+            assert media_path is not None
+            assert on_media_upload_started is not None
+            assert on_media_uploaded is not None
+            _ = on_media_upload_started()
+            _ = on_media_uploaded("123456")
+            raise RuntimeError("failed before tweet creation")
+        return XPublishResult("789", "https://x.com/i/status/789", existing_media_id)
+
+    first_run = datetime(2026, 8, 14, 15, 5, tzinfo=UTC)
+    store = StateStore(settings.state_path)
+    autopilot = Autopilot(
+        settings,
+        FakeGenerator(),
+        store,
+        image_generator=FakeImageGenerator(),
+        x_publisher=publish_x_post,
+    )
+    asyncio.run(autopilot.run_due(first_run))
+    asyncio.run(autopilot.run_due(first_run.replace(minute=20)))
+    store.close()
+
+    row = rows(settings.state_path)[0]
+    assert calls == [None, "123456"]
+    assert row["status"] == "published"
+    assert row["x_media_id"] == "123456"
+
+
+def test_ambiguous_x_publish_is_never_retried(tmp_path: Path) -> None:
+    settings = config(
+        tmp_path,
+        notes_enabled=False,
+        newsletters_enabled=False,
+        x_enabled=True,
+        x_mode="publish",
+    )
+    calls = 0
+
+    async def publish_x_post(
+        text: str,
+        cookie_file: Path,
+        **kwargs: object,
+    ) -> XPublishResult:
+        nonlocal calls
+        calls += 1
+        raise XPublishOutcomeUnknownError("response lost")
+
+    now = datetime(2026, 8, 14, 15, 5, tzinfo=UTC)
+    store = StateStore(settings.state_path)
+    autopilot = Autopilot(settings, FakeGenerator(), store, x_publisher=publish_x_post)
+    asyncio.run(autopilot.run_due(now))
+    asyncio.run(autopilot.run_due(now.replace(minute=20)))
+    store.close()
+
+    assert calls == 1
+    assert rows(settings.state_path)[0]["status"] == "publishing_unknown"
+
+
 def _set_required_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUBSTACK_AUTOPILOT_TOPICS", "engineering")
     monkeypatch.setenv("SUBSTACK_AUTOPILOT_TIMEZONE", "UTC")
     monkeypatch.setenv("SUBSTACK_AUTOPILOT_NOTES_ENABLED", "false")
     monkeypatch.setenv("SUBSTACK_AUTOPILOT_NEWSLETTERS_ENABLED", "false")
     monkeypatch.setenv("SUBSTACK_AUTOPILOT_IMAGES_ENABLED", "false")
+    monkeypatch.setenv("X_AUTOPILOT_ENABLED", "false")
     monkeypatch.setenv("SUBSTACK_AUTOPILOT_NEWSLETTER_MODE", "draft_only")
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://azure.example.test")
     monkeypatch.setenv("AZURE_OPENAI_KEY", "test-key")
     monkeypatch.setenv("OPENAI_API_VERSION", "2024-10-21")
     monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT_NAME", "test-deployment")
+
+
+def test_x_publish_config_requires_explicit_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_environment(monkeypatch)
+    monkeypatch.setenv("X_AUTOPILOT_ENABLED", "true")
+    monkeypatch.setenv("X_AUTOPILOT_MODE", "publish")
+    monkeypatch.setenv("X_AUTOPILOT_COOKIES_PATH", "data/x-cookies.json")
+
+    with pytest.raises(ValueError, match="PUBLISH_TO_X"):
+        _ = config_from_env(dry_run=False)
+
+    monkeypatch.setenv("X_AUTOPILOT_PUBLISH_CONFIRMATION", "PUBLISH_TO_X")
+    settings, _, _ = config_from_env(dry_run=False)
+    assert settings.x_mode == "publish"
+    assert settings.x_cookies_path == Path("data/x-cookies.json")
 
 
 def test_config_accepts_positive_writer_id(monkeypatch: pytest.MonkeyPatch) -> None:

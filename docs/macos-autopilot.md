@@ -13,6 +13,7 @@ unexpected failure, and stores its logs and persistent state inside the project.
   `~/Developer/substack-gateway-oss`
 - an Azure OpenAI text deployment and, optionally, an image deployment
 - a signed-in Substack publication session
+- optionally, a signed-in X session for X Autopilot
 
 The Mac must be awake and connected to the internet when a slot is due. A user
 LaunchAgent does not run before login and cannot publish while the Mac is asleep.
@@ -85,6 +86,62 @@ AZURE_OPENAI_IMAGE_QUALITY=medium
 Keep pipe-separated values quoted. Do not use `source .env.autopilot`; let `uv`
 parse it with `--env-file`. Never commit this file.
 
+### Optional X configuration
+
+X Autopilot uses the unofficial [Twikit](https://github.com/d60/twikit) browser
+API wrapper. X can change these private APIs without notice, and automated use
+may trigger verification, cookie expiry, or rate limits. The worker only creates
+posts; it does not automate likes, follows, replies, DMs, or other engagement.
+
+With X signed in, export a Netscape-format `cookies.txt` using your local browser
+extension. Import only `auth_token` and `ct0` into an ignored mode-`0600` file:
+
+```bash
+uv run python scripts/import-x-cookies.py \
+  /path/to/x-cookies.txt \
+  data/x-cookies.json
+```
+
+The importer accepts `x.com` and legacy `twitter.com` cookie domains and never
+prints cookie values. If creating the file manually, use complete, unshortened
+values:
+
+```json
+{
+  "auth_token": "YOUR_COMPLETE_VALUE",
+  "ct0": "YOUR_COMPLETE_VALUE"
+}
+```
+
+Then run `chmod 600 data/x-cookies.json`. The ignored `data/` directory prevents
+the file from being committed, but it remains a sensitive login credential.
+
+Start with artifact-only mode and an absolute cookie path:
+
+```dotenv
+X_AUTOPILOT_ENABLED=true
+X_AUTOPILOT_COOKIES_PATH=/absolute/path/to/substack-gateway-oss/data/x-cookies.json
+X_AUTOPILOT_INTERVAL_HOURS=3
+X_AUTOPILOT_IMAGES_ENABLED=false
+X_AUTOPILOT_MODE=artifact_only
+```
+
+X scheduling is independent of notes and newsletters. Setting
+`X_AUTOPILOT_IMAGES_ENABLED=true` generates and uploads one image per X slot and
+requires the Azure image deployment settings. Live posting is deliberately
+gated by both:
+
+```dotenv
+X_AUTOPILOT_MODE=publish
+X_AUTOPILOT_PUBLISH_CONFIRMATION=PUBLISH_TO_X
+```
+
+Generated X text is requested below 260 characters and validated at no more than
+280 Unicode code points. The worker persists an uploaded media ID before tweet
+creation and reuses it after safe pre-create failures. Once tweet creation is
+attempted, any exception becomes `publishing_unknown` and is not retried
+automatically, preventing an uncertain request from creating duplicate posts.
+
 `SUBSTACK_GATEWAY_TOKEN` is base64-encoded compact JSON, not a value issued under
 that name by Substack:
 
@@ -120,10 +177,27 @@ POST /api/v1/image → 200
 PUT /api/v1/drafts/<draft-id> → 200
 ```
 
-Review the generated note and newsletter before enabling continuous operation.
-A note is published immediately when notes are enabled; `draft_only` applies to
-newsletters, not notes. Set `SUBSTACK_AUTOPILOT_NOTES_ENABLED=false` during a
-newsletter-only test if publishing a note is not desired.
+Review the generated note, newsletter, and `data/artifacts/x_post/` output before
+enabling continuous operation. A note is published immediately when notes are
+enabled; `draft_only` applies to newsletters, not notes. Set
+`SUBSTACK_AUTOPILOT_NOTES_ENABLED=false` during a newsletter-only test if
+publishing a note is not desired.
+
+For a controlled X live test, first stop the LaunchAgent so two workers cannot
+use the same SQLite database:
+
+```bash
+launchctl bootout gui/$(id -u)/com.substack-gateway.autopilot
+X_AUTOPILOT_MODE=publish \
+X_AUTOPILOT_PUBLISH_CONFIRMATION=PUBLISH_TO_X \
+uv run --env-file .env.autopilot substack-autopilot --once
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/com.substack-gateway.autopilot.plist
+```
+
+This posts every currently due, nonterminal X slot, not arbitrary test text.
+Inspect the generated artifact before changing to live mode. Do not run this
+one-off command while the LaunchAgent is active.
 
 ## 4. Install the LaunchAgent
 

@@ -63,11 +63,7 @@ class AzureOpenAIContentGenerator:
                     "messages": [
                         {
                             "role": "system",
-                            "content": (
-                                "You are an expert Substack writer. Return only polished "
-                                + "Markdown with no preamble or fenced code block. Never invent "
-                                + "facts, quotes, sources, or personal experiences."
-                            ),
+                            "content": _system_prompt(kind),
                         },
                         {"role": "user", "content": prompt},
                     ],
@@ -146,15 +142,16 @@ def _raise_azure_error(response: httpx.Response, operation: str) -> None:
 
 
 def image_prompt(kind: str, topic: str, context: str) -> str:
-    if kind not in {"note", "newsletter"}:
+    if kind not in {"note", "newsletter", "x_post"}:
         raise ValueError(f"Unsupported content kind: {kind}")
     format_hint = (
         "editorial hero illustration in a wide landscape composition"
         if kind == "newsletter"
         else "editorial social illustration with a clear central subject"
     )
+    platform = "an X post" if kind == "x_post" else f"a Substack {kind}"
     return (
-        f"Create a polished {format_hint} for a Substack {kind} about {topic}. "
+        f"Create a polished {format_hint} for {platform} about {topic}. "
         "Use an original, modern visual metaphor, strong composition, restrained colors, "
         "and generous negative space. Do not include words, letters, logos, watermarks, "
         "screenshots, recognizable public figures, or copyrighted characters. "
@@ -183,6 +180,15 @@ def _first_image(payload: Any) -> dict[str, Any]:
     return data[0]
 
 
+def _system_prompt(kind: str) -> str:
+    platform = "X" if kind == "x_post" else "Substack"
+    return (
+        f"You are an expert {platform} writer. Return only the finished content with no "
+        "preamble or fenced code block. Never invent facts, quotes, sources, or personal "
+        "experiences."
+    )
+
+
 def _prompt(kind: str, topic: str, context: str) -> str:
     shared = (
         f"Topic: {topic}\nPublication context and voice: {context or 'None provided.'}"
@@ -193,6 +199,16 @@ def _prompt(kind: str, topic: str, context: str) -> str:
             + "words. Lead with a strong standalone observation, provide one useful insight, "
             + "and end with a natural question or memorable conclusion. Do not use a title, "
             + "generic motivational filler, or more than one hashtag.\n\n"
+            + shared
+        )
+    if kind == "x_post":
+        return (
+            "Write one standalone X post. Keep it under 260 Unicode characters to leave "
+            "headroom for X's weighted character rules. Open with a specific, compelling "
+            "observation and deliver one useful idea. Use plain text, no Markdown headings, "
+            "no thread numbering, no links unless supplied in the context, and at most one "
+            "relevant hashtag. Avoid engagement bait, generic inspiration, and claims about "
+            "current events not present in the context. Return only the post text.\n\n"
             + shared
         )
     if kind == "newsletter":

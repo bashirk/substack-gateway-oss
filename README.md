@@ -127,10 +127,11 @@ session if a credential has been exposed.
 
 ## Content Autopilot
 
-The optional `substack-autopilot` worker generates Markdown with Azure OpenAI,
-publishes notes on deterministic three-hour slots, and generates one newsletter
-slot per day. SQLite stores slot state, artifact paths, draft IDs, and post IDs
-so restarts do not intentionally create duplicate work.
+The optional `substack-autopilot` worker generates content with Azure OpenAI,
+publishes Substack notes on deterministic interval slots, generates one
+newsletter slot per day, and can independently generate X posts. SQLite stores
+slot state, artifact paths, media IDs, draft IDs, and post IDs so restarts do not
+intentionally create duplicate work.
 
 Copy `autopilot.env.example` to `.env.autopilot` and fill in credentials.
 Run one local cycle with:
@@ -191,6 +192,45 @@ volume; local macOS installations should use absolute paths under `data/`. A
 `publishing_unknown` slot is deliberately not automatically retried because
 Substack may have accepted a request whose response was lost; inspect and
 reconcile such a slot manually.
+
+### X Autopilot with Twikit
+
+X posting uses the unofficial [Twikit](https://github.com/d60/twikit) browser API
+wrapper and exported browser cookies. Twikit can break when X changes private
+APIs and may trigger verification, authentication failures, or rate limits. It
+is disabled by default and does not automate engagement actions.
+
+Export X cookies in Netscape `cookies.txt` format while signed in, then import
+only the required cookies without printing their values:
+
+```bash
+uv run python scripts/import-x-cookies.py /path/to/cookies.txt data/x-cookies.json
+```
+
+Alternatively, create a mode-`0600` flat JSON file containing the complete
+values:
+
+```json
+{
+  "auth_token": "YOUR_COMPLETE_VALUE",
+  "ct0": "YOUR_COMPLETE_VALUE"
+}
+```
+
+Configure an absolute `X_AUTOPILOT_COOKIES_PATH`, then start safely with:
+
+```dotenv
+X_AUTOPILOT_ENABLED=true
+X_AUTOPILOT_INTERVAL_HOURS=3
+X_AUTOPILOT_IMAGES_ENABLED=false
+X_AUTOPILOT_MODE=artifact_only
+```
+
+Live posting requires both `X_AUTOPILOT_MODE=publish` and the exact
+`X_AUTOPILOT_PUBLISH_CONFIRMATION=PUBLISH_TO_X`. X artifacts, optional images,
+media IDs, tweet IDs, and failures use the same SQLite state store. Once tweet
+creation begins, an exception becomes `publishing_unknown` and is never retried
+automatically; inspect X before manually reconciling it.
 
 A single note artifact can also be published with:
 

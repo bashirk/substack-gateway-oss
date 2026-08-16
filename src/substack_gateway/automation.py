@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
-from typing import Protocol, cast, final
+from typing import Literal, Protocol, cast, final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from substack_gateway.generation import (
@@ -31,8 +31,15 @@ from substack_gateway.publish_newsletter import (
     publish_markdown_newsletter,
 )
 from substack_gateway.publish_note import publish_markdown_note
+from substack_gateway.publish_x import (
+    XPublishOutcomeUnknownError,
+    XPublishResult,
+    publish_x,
+)
 
 _log = logging.getLogger(__name__)
+
+XMode = Literal["artifact_only", "publish"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,12 @@ class AutomationConfig:
     writer_id: int | None = None
     images_enabled: bool = False
     image_maximum_bytes: int = 20 * 1024 * 1024
+    x_enabled: bool = False
+    x_interval_hours: int = 3
+    x_mode: XMode = "artifact_only"
+    x_publish_confirmation: str | None = None
+    x_cookies_path: Path | None = None
+    x_images_enabled: bool = False
 
 
 class NewsletterPublish(Protocol):
@@ -75,6 +88,19 @@ class NewsletterPublish(Protocol):
         email_confirmation: str | None = None,
         writer_id: int | None = None,
     ) -> NewsletterResult: ...
+
+
+class XPublish(Protocol):
+    async def __call__(
+        self,
+        text: str,
+        cookie_file: Path,
+        *,
+        media_path: Path | None = None,
+        existing_media_id: str | None = None,
+        on_media_upload_started: Callable[[], object] | None = None,
+        on_media_uploaded: Callable[[str], object] | None = None,
+    ) -> XPublishResult: ...
 
 
 @dataclass(frozen=True)
@@ -114,6 +140,7 @@ class StateStore:
                 image_upload_width INTEGER,
                 image_upload_height INTEGER,
                 image_upload_error TEXT,
+                x_media_id TEXT,
                 external_id TEXT,
                 post_id TEXT,
                 draft_updated_at TEXT,
@@ -136,6 +163,7 @@ class StateStore:
             "image_upload_url",
             "image_upload_content_type",
             "image_upload_error",
+            "x_media_id",
         )
         for name in text_columns:
             if name not in columns:
@@ -197,6 +225,7 @@ class StateStore:
             "image_upload_width",
             "image_upload_height",
             "image_upload_error",
+            "x_media_id",
             "external_id",
             "post_id",
             "draft_updated_at",
@@ -233,6 +262,14 @@ def due_slots(now: datetime, config: AutomationConfig) -> list[ScheduleSlot]:
         )
         if scheduled <= local_now:
             slots.append(ScheduleSlot("newsletter", scheduled))
+    if config.x_enabled:
+        hour = (local_now.hour // config.x_interval_hours) * config.x_interval_hours
+        slots.append(
+            ScheduleSlot(
+                "x_post",
+                local_now.replace(hour=hour, minute=0, second=0, microsecond=0),
+            )
+        )
     return slots
 
 
@@ -253,6 +290,7 @@ class Autopilot:
         ),
         newsletter_publisher: NewsletterPublish = publish_markdown_newsletter,
         image_generator: ImageGenerator | None = None,
+        x_publisher: XPublish = publish_x,
     ) -> None:
         self._config: AutomationConfig = config
         self._generator: ContentGenerator = generator
@@ -260,6 +298,7 @@ class Autopilot:
         self._publisher: Callable[[Path, str, str | None], Awaitable[int]] = publisher
         self._newsletter_publisher: NewsletterPublish = newsletter_publisher
         self._image_generator: ImageGenerator | None = image_generator
+        self._x_publisher: XPublish = x_publisher
 
     async def run_due(self, now: datetime | None = None) -> None:
         current = now or datetime.now(UTC)
@@ -303,7 +342,10 @@ class Autopilot:
                     retry_after=None,
                 )
 
-            if self._config.images_enabled and image_artifact is None:
+            generate_image = (
+                slot.kind == "newsletter" and self._config.images_enabled
+            ) or (slot.kind == "x_post" and self._config.x_images_enabled)
+            if generate_image and image_artifact is None:
                 if self._image_generator is None:
                     raise ValueError(
                         "Image generation is enabled without an image generator"
@@ -330,6 +372,9 @@ class Autopilot:
 
             if slot.kind == "newsletter":
                 await self._run_newsletter(slot, row, artifact, image_artifact, now)
+                return
+            if slot.kind == "x_post":
+                await self._run_x_post(slot, row, artifact, image_artifact, now)
                 return
             if self._config.dry_run:
                 self._store.update(slot.id, now, status="dry_run")
@@ -358,6 +403,99 @@ class Autopilot:
                 values.update(image_status="failed", image_error=error)
             self._store.update(slot.id, now, **values)
             _log.exception("Autopilot slot %s failed with status %s", slot.id, status)
+
+    async def _run_x_post(
+        self,
+        slot: ScheduleSlot,
+        row: sqlite3.Row,
+        artifact: Path,
+        image_artifact: Path | None,
+        now: datetime,
+    ) -> None:
+        if self._config.dry_run or self._config.x_mode == "artifact_only":
+            self._store.update(slot.id, now, status="artifact_only")
+            _log.info("Generated X post artifact %s", artifact)
+            return
+        if self._config.x_cookies_path is None:
+            raise ValueError("X cookie path is required when X publishing is enabled")
+
+        existing_media_id = str(row["x_media_id"]) if row["x_media_id"] else None
+        upload_started = False
+        upload_completed = existing_media_id is not None
+
+        def persist_upload_started() -> None:
+            nonlocal upload_started
+            upload_started = True
+            self._store.update(
+                slot.id,
+                datetime.now(UTC),
+                image_upload_status="uploading",
+                image_upload_error=None,
+            )
+
+        def persist_uploaded(media_id: str) -> None:
+            nonlocal upload_completed
+            upload_completed = True
+            self._store.update(
+                slot.id,
+                datetime.now(UTC),
+                image_upload_status="uploaded",
+                x_media_id=media_id,
+                image_upload_error=None,
+            )
+
+        self._store.update(slot.id, now, status="publishing")
+        text = artifact.read_text(encoding="utf-8").strip()
+        try:
+            result = await self._x_publisher(
+                text,
+                self._config.x_cookies_path,
+                media_path=image_artifact,
+                existing_media_id=existing_media_id,
+                on_media_upload_started=persist_upload_started,
+                on_media_uploaded=persist_uploaded,
+            )
+        except XPublishOutcomeUnknownError as exc:
+            self._store.update(
+                slot.id,
+                now,
+                status="publishing_unknown",
+                attempts=int(row["attempts"]) + 1,
+                error=f"{type(exc).__name__}: {exc}",
+                retry_after=None,
+            )
+            _log.exception("X slot %s has an ambiguous outcome", slot.id)
+            return
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            self._store.update(
+                slot.id,
+                now,
+                status="failed",
+                attempts=int(row["attempts"]) + 1,
+                error=error,
+                image_upload_error=(
+                    error if upload_started and not upload_completed else None
+                ),
+                retry_after=(
+                    now + timedelta(seconds=self._config.retry_seconds)
+                ).isoformat(),
+            )
+            _log.exception("X slot %s failed before tweet creation", slot.id)
+            return
+
+        self._store.update(
+            slot.id,
+            now,
+            status="published",
+            external_id=result.tweet_id,
+            post_id=result.tweet_id,
+            x_media_id=result.media_id,
+            image_upload_status="uploaded" if result.media_id else None,
+            error=None,
+            retry_after=None,
+        )
+        _log.info("Published X post %s at %s", result.tweet_id, result.tweet_url)
 
     async def _run_newsletter(
         self,
@@ -573,6 +711,20 @@ def config_from_env(
     notes_enabled = _boolean("SUBSTACK_AUTOPILOT_NOTES_ENABLED", True)
     newsletters_enabled = _boolean("SUBSTACK_AUTOPILOT_NEWSLETTERS_ENABLED", True)
     images_enabled = _boolean("SUBSTACK_AUTOPILOT_IMAGES_ENABLED", False)
+    x_enabled = _boolean("X_AUTOPILOT_ENABLED", False)
+    x_images_enabled = _boolean("X_AUTOPILOT_IMAGES_ENABLED", False)
+    x_mode_value = os.environ.get("X_AUTOPILOT_MODE", "artifact_only")
+    if x_mode_value not in {"artifact_only", "publish"}:
+        raise ValueError("X_AUTOPILOT_MODE must be one of: artifact_only, publish")
+    x_mode = x_mode_value
+    x_publish_confirmation = os.environ.get("X_AUTOPILOT_PUBLISH_CONFIRMATION")
+    if x_enabled and x_mode == "publish" and x_publish_confirmation != "PUBLISH_TO_X":
+        raise ValueError(
+            "X publish mode requires X_AUTOPILOT_PUBLISH_CONFIRMATION=PUBLISH_TO_X"
+        )
+    x_cookies_value = os.environ.get("X_AUTOPILOT_COOKIES_PATH", "").strip()
+    if x_enabled and x_mode == "publish" and not x_cookies_value:
+        raise ValueError("X_AUTOPILOT_COOKIES_PATH is required in X publish mode")
     newsletter_mode_value = os.environ.get(
         "SUBSTACK_AUTOPILOT_NEWSLETTER_MODE", "draft_only"
     )
@@ -627,11 +779,19 @@ def config_from_env(
         image_maximum_bytes=int(
             os.environ.get("SUBSTACK_AUTOPILOT_IMAGE_MAX_BYTES", "20971520")
         ),
+        x_enabled=x_enabled,
+        x_interval_hours=int(os.environ.get("X_AUTOPILOT_INTERVAL_HOURS", "3")),
+        x_mode=x_mode,
+        x_publish_confirmation=x_publish_confirmation,
+        x_cookies_path=Path(x_cookies_value).expanduser() if x_cookies_value else None,
+        x_images_enabled=x_images_enabled,
     )
     if config.note_interval_hours < 1 or config.note_interval_hours > 24:
         raise ValueError(
             "SUBSTACK_AUTOPILOT_NOTE_INTERVAL_HOURS must be between 1 and 24"
         )
+    if config.x_interval_hours < 1 or config.x_interval_hours > 24:
+        raise ValueError("X_AUTOPILOT_INTERVAL_HOURS must be between 1 and 24")
     endpoint = _required("AZURE_OPENAI_ENDPOINT")
     api_key = _required("AZURE_OPENAI_KEY")
     api_version = _required("OPENAI_API_VERSION")
@@ -642,7 +802,7 @@ def config_from_env(
         deployment=_required("AZURE_OPENAI_DEPLOYMENT_NAME"),
     )
     image_provider = None
-    if images_enabled:
+    if images_enabled or (x_enabled and x_images_enabled):
         image_provider = AzureOpenAIImageConfig(
             endpoint=endpoint,
             api_key=api_key,
@@ -684,7 +844,7 @@ def _boolean(name: str, default: bool) -> bool:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate Substack content and autonomously publish scheduled notes."
+        description="Generate and schedule Substack and X content."
     )
     _ = parser.add_argument(
         "--once", action="store_true", help="Process due slots and exit"
@@ -692,7 +852,7 @@ def _parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Generate artifacts without publishing notes",
+        help="Generate artifacts without publishing",
     )
     return parser
 
@@ -718,13 +878,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     _log.info(
         "Autopilot started: mode=%s timezone=%s poll_seconds=%d notes=%s "
-        "newsletters=%s images=%s state=%s artifacts=%s",
+        "newsletters=%s images=%s x=%s x_mode=%s x_images=%s state=%s artifacts=%s",
         config.newsletter_mode,
         config.timezone.key,
         config.poll_seconds,
         config.notes_enabled,
         config.newsletters_enabled,
         config.images_enabled,
+        config.x_enabled,
+        config.x_mode,
+        config.x_images_enabled,
         config.state_path,
         config.artifact_dir,
     )
